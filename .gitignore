@@ -1,3 +1,4 @@
+
 # Object files
 *.o
 *.ko
@@ -31,3 +32,6 @@
 # Debug files
 *.dSYM/
 *.su
+.idea/
+cmake-build-debug/
+
