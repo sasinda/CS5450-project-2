@@ -40,8 +40,9 @@ typedef struct {
 	uint8_t  type;            /* packet type (e.g. SYN, DATA, ACK, FIN)     */
 	uint8_t  seqnum;          /* sequence number of the packet              */
     uint16_t checksum;        /* header and payload checksum                */
+	uint16_t  length;		  /* length in bytes, the header and data, or the size of the segment. 48(header only) for control packets, checksum will exclude words after the len if sent. */
     uint8_t data[DATALEN];    /* pointer to the payload                     */
-} __attribute__((packed)) gbnhdr;
+} __attribute__((packed, aligned(1))) gbnhdr;
 
 typedef struct state_t{
 
@@ -76,4 +77,5 @@ ssize_t  maybe_sendto(int  s, const void *buf, size_t len, int flags, \
 uint16_t checksum(uint16_t *buf, int nwords);
 
 
+void deserialize_gbnhdr(const uint8_t* buffer, const int* buf_len,  gbnhdr *segment);
 #endif
