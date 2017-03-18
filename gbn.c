@@ -8,7 +8,7 @@ void make_syn_pack(gbnhdr *seg);
 
 void make_synack_pack(gbnhdr *seg);
 
-void make_data_pack(gbnhdr *seg, const void *buff, size_t len);
+void make_data_pack(gbnhdr *seg, const void *buff, size_t len, uint8_t seq_num);
 
 gbnhdr make_dataack_pack(gbnhdr *seg, uint8_t seq_num);
 
@@ -84,16 +84,18 @@ ssize_t gbn_send(int sockfd, const void *buf, size_t len, int flags) {
                 if (cwin->buf == NULL) {
                     cwin->buf = nxt;
                     cwin->len = -1;
-                } else if (cwin->data_acked || cwin->exp_on < (unsigned long) time(NULL)) {
+                    cwin->seq_num=++sm.seq_num;
+                } else if (cwin->data_acked || cwin->exp_on > (unsigned long) time(NULL)) {
+                    curr_widx += 1;
                     continue;
                 }
 
                 gbnhdr seg;
                 if ((len - sidx) > DATALEN) {
-                    make_data_pack(&seg, cwin->buf, DATALEN);
+                    make_data_pack(&seg, cwin->buf, DATALEN, cwin->seq_num);
                     sent += sendto(sockfd, &seg, seg.length, 0, &sm.dest_sock_addr, sm.dest_sock_len);
                 } else {
-                    make_data_pack(&seg, cwin->buf, len - sidx);
+                    make_data_pack(&seg, cwin->buf, len - sidx,cwin->seq_num);
                     sent += sendto(sockfd, &seg, seg.length, 0, &sm.dest_sock_addr, sm.dest_sock_len);
                 }
                 if (cwin->len == -1) {
@@ -105,8 +107,8 @@ ssize_t gbn_send(int sockfd, const void *buf, size_t len, int flags) {
             }
             //Wait for data ack
             settimers(win, win_size);
-            wait_for_dataack(&win, win_size);
-            sidx = move_window(&win, win_size, sidx);
+            wait_for_dataack(win, win_size);
+            sidx = move_window(win, win_size, sidx);
         }
     }
     printf("sent %d bytes", sent);
@@ -126,10 +128,11 @@ int wait_for_dataack(struct window_elem *window, int win_size) {
                                      (struct sockaddr *) &their_addr, &addr_len);
             int j = -1;
             if (num_bytes > 0 && dataack.type == DATAACK) {
-                while (window[++j].seq_num != dataack.seqnum && j < win_size) {
-                }
-                window[j].data_acked = true;
-                sm.num_success += 1;
+                while (window[++j].seq_num != dataack.seqnum && j < win_size);
+                if(j<win_size){
+                    window[j].data_acked = true;
+                    sm.num_success += 1;
+                }                
             } else if (num_bytes < 0 && errno == EINTR) {
                 handle_timeout(errno);
                 break;//return to main loop. It'll resend unacked packets
@@ -147,12 +150,13 @@ ssize_t gbn_recv(int sockfd, void *buf, size_t len, int flags) {
     int numbytes = recvfrom(sockfd, &data_seg, ACCPT_BUFLEN - 1, 0,
                             (struct sockaddr *) &their_addr, &addr_len);
     if (numbytes > 0 && data_seg.type == DATA) {
-        if (data_seg.length + HEADLEN == numbytes) {
+        if (data_seg.length == numbytes) {
             gbnhdr data_ack;
+            make_dataack_pack(&data_ack, data_seg.seqnum);
             //send dataack and the copy data to buffer.
             sendto(sockfd, &data_ack, data_ack.length, 0, &sm.dest_sock_addr, sm.dest_sock_len);
             memcpy(buf, data_seg.data, fmin(data_seg.length, len));
-            printf("gbn_recv: %d bytes", numbytes);
+            printf("gbn_recv: %d bytes. Sent data ack\n", numbytes);
         }
     }
     return numbytes;
@@ -179,13 +183,18 @@ int gbn_connect(int sockfd, const struct sockaddr *server, socklen_t socklen) {
 
         //set timeout
         static struct itimerval timout;
+        static struct itimerval timout_zero;
         static struct timeval val = {2, 1};
+        static  struct timeval zero = {0,0};
         timout.it_value = val;
-        timout.it_interval=val;
+        timout.it_interval=zero;
+        timout_zero.it_value=zero;
+        timout_zero.it_interval=zero;
         setitimer(ITIMER_REAL, &timout, NULL);
 
         numbytes = recvfrom(sockfd, &seg_recv, ACCPT_BUFLEN - 1, 0,
                             (struct sockaddr *) &their_addr, &addr_len);
+        setitimer(ITIMER_REAL, &timout_zero, &timout);
         if (numbytes > 0 && seg_recv.type == SYNACK) {
             printf("recvd  SYNACK. Sending synack for threeway handshake \n", seg_recv.type);
             gbnhdr seg_sack;
@@ -234,18 +243,22 @@ int gbn_listen(int sockfd, int backlog) {
 }
 
 int gbn_bind(int sockfd, const struct sockaddr *server, socklen_t socklen) {
-    sm.state = UNKNOWN;
-    sm.sockfd = sockfd;
     sm.my_sock_addr = *server;
     sm.my_sock_len = socklen;
     return bind(sockfd, server, socklen);
 }
 
 int gbn_socket(int domain, int type, int protocol) {
-    /*----- Randomizing the seed. This is used by the rand() function -----*/
+
+    int sockfd=socket(domain, type, protocol);
     signal(SIGALRM, handle_timeout);
+
+    sm.state = UNKNOWN;
+    sm.sockfd = sockfd;
+    /*----- Randomizing the seed. This is used by the rand() function -----*/
     srand((unsigned) time(0));
-    return socket(domain, type, protocol);
+    sm.seq_num = (uint8_t)rand();
+    return sockfd ;
 }
 
 int gbn_accept(int sockfd, struct sockaddr *client, socklen_t *socklen) {
@@ -254,7 +267,7 @@ int gbn_accept(int sockfd, struct sockaddr *client, socklen_t *socklen) {
     char s[INET6_ADDRSTRLEN];
     int numbytes;
 
-    printf("waiting for synack, three way handshake\n");
+    printf("waiting for synack, for the three way handshake\n");
     addr_len = sizeof their_addr;
     gbnhdr synack;
     if ((numbytes = recvfrom(sockfd, &synack, ACCPT_BUFLEN - 1, 0,
@@ -335,8 +348,8 @@ void make_synack_pack(gbnhdr *seg) {
     seg->checksum = checksum(&seg, 3);
 }
 
-void make_data_pack(gbnhdr *seg, const void *buff, size_t len) {
-    gbnhdr segi = {DATA, ++sm.seq_num, 0, HEADLEN};
+void make_data_pack(gbnhdr *seg, const void *buff, size_t len, uint8_t seq_num) {
+    gbnhdr segi = {DATA, seq_num, 0, HEADLEN};
     *seg = segi;
     memcpy(seg->data, buff, len);
     seg->length += len;
@@ -375,7 +388,7 @@ void handle_timeout(int s) {
     //do nothing. just retulrn back to original flow. pack will be recent in the loop, since we have the state in window stlructure.
 }
 
-void settimers(struct window_elem *tot_window, int win_len) {
+void settimers(struct window_elem* tot_window, int win_len) {
     static const struct timeval TIMEOUT_T = {TIMEOUT, 0};
     static struct itimerval timout;
     timout.it_value = TIMEOUT_T;
