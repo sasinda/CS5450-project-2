@@ -1,6 +1,10 @@
 #ifndef _gbn_h
 #define _gbn_h
 
+#include <arpa/inet.h>
+#include <tgmath.h>
+#include <sys/time.h>
+
 #include<sys/types.h>
 #include<sys/socket.h>
 #include<sys/ioctl.h>
@@ -14,6 +18,7 @@
 #include<errno.h>
 #include<netdb.h>
 #include<time.h>
+#include <stdbool.h>
 
 /*----- Error variables -----*/
 extern int h_errno;
@@ -23,8 +28,12 @@ extern int errno;
 #define LOSS_PROB 1e-2    /* loss probability                            */
 #define CORR_PROB 1e-3    /* corruption probability                      */
 #define DATALEN   1024    /* length of the payload                       */
+#define HEADLEN   6    /* length of the header in bytes                      */
 #define N         1024    /* Max number of packets a single call to gbn_send can process */
 #define TIMEOUT      1    /* timeout to resend packets (1 second)        */
+
+#define MAX_WINDOW_SIZE 2
+
 
 /*----- Packet types -----*/
 #define SYN      0        /* Opens a connection                          */
@@ -40,17 +49,34 @@ typedef struct {
 	uint8_t  type;            /* packet type (e.g. SYN, DATA, ACK, FIN)     */
 	uint8_t  seqnum;          /* sequence number of the packet              */
     uint16_t checksum;        /* header and payload checksum                */
-	uint16_t  length;		  /* length in bytes, the header and data, or the size of the segment. 48(header only) for control packets, checksum will exclude words after the len if sent. */
+	uint16_t  length;		  /* length in bytes for the data/payload. */
     uint8_t data[DATALEN];    /* pointer to the payload                     */
 } __attribute__((packed, aligned(1))) gbnhdr;
 
 typedef struct state_t{
+	uint8_t state;
+	int sockfd;
+	uint8_t seq_num;
+	int num_success;
+    struct sockaddr my_sock_addr;
+    socklen_t my_sock_len;
+    struct sockaddr dest_sock_addr;
+    socklen_t dest_sock_len;
 
-	/* TODO: Your state information could be encoded here. */
 
 } state_t;
 
+typedef struct window_elem{
+	void *buf;
+	int  len;
+	uint8_t seq_num;
+	unsigned long exp_on;
+	struct itimerval timeout;
+	bool data_acked;
+};
+
 enum {
+	UNKNOWN=-1,
 	CLOSED=0,
 	SYN_SENT,
 	SYN_RCVD,
@@ -59,7 +85,7 @@ enum {
 	FIN_RCVD
 };
 
-extern state_t s;
+extern state_t sm;
 
 void gbn_init();
 int gbn_connect(int sockfd, const struct sockaddr *server, socklen_t socklen);
