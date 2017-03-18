@@ -132,7 +132,7 @@ int wait_for_dataack(struct window_elem *window, int win_size) {
                 if(j<win_size){
                     window[j].data_acked = true;
                     sm.num_success += 1;
-                }                
+                }
             } else if (num_bytes < 0 && errno == EINTR) {
                 handle_timeout(errno);
                 break;//return to main loop. It'll resend unacked packets
@@ -149,6 +149,7 @@ ssize_t gbn_recv(int sockfd, void *buf, size_t len, int flags) {
     socklen_t addr_len;
     int numbytes = recvfrom(sockfd, &data_seg, ACCPT_BUFLEN - 1, 0,
                             (struct sockaddr *) &their_addr, &addr_len);
+    int data_len=numbytes;
     if (numbytes > 0 && data_seg.type == DATA) {
         if (data_seg.length == numbytes) {
             gbnhdr data_ack;
@@ -157,12 +158,25 @@ ssize_t gbn_recv(int sockfd, void *buf, size_t len, int flags) {
             sendto(sockfd, &data_ack, data_ack.length, 0, &sm.dest_sock_addr, sm.dest_sock_len);
             memcpy(buf, data_seg.data, fmin(data_seg.length, len));
             printf("gbn_recv: %d bytes. Sent data ack\n", numbytes);
+            data_len=data_seg.length-HEADLEN;
+        } else{
+            //some problem with getting data. Don't send the ack. return with a -1 read error.
+            data_len=-1;
         }
+    } else if (numbytes>0 && data_seg.type==FIN){
+        sm.state=FIN_RCVD;
+        data_len=0;
     }
-    return numbytes;
+    return data_len;
 }
 
 int gbn_close(int sockfd) {
+    if(sm.state==FIN_RCVD){
+        //TODO send finack
+//        sendto(sockfd, &data_ack, data_ack.length, 0, &sm.dest_sock_addr, sm.dest_sock_len);
+    }
+    sm.state=FIN_SENT;
+    //TODO wait with timeout for finack
     return close(sockfd);
 }
 
