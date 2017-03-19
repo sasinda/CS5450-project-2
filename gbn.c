@@ -228,20 +228,66 @@ ssize_t gbn_recv(int sockfd, void *buf, size_t len, int flags) {
 }
 
 int gbn_close(int sockfd) {
-    if (sm.state == FIN_RCVD) {
-        //TODO send finack
-        //sendto(sockfd, &data_ack, data_ack.length, 0, &sm.dest_sock_addr, sm.dest_sock_len);
+
+        if(sm.state == ESTABLISHED){
+
+            int finsent =0;
+
+            while(finsent < 6) {
+
+            finsent++;
+            gbnhdr fin;
+            make_fin_pack(&fin, sm.seq_num);
+            int sent = sendto(sockfd, &fin, fin.length, 0, &sm.dest_sock_addr, sm.dest_sock_len);
+            if(sent) {
+                sm.state = FIN_SENT;
+                gbnhdr finack;
+
+                    static struct itimerval timout;
+                    static struct itimerval timout_zero;
+
+                    timout.it_value = TV_VAL;
+                    timout.it_interval = TV_ZERO;
+                    timout_zero.it_value = TV_ZERO;
+                    timout_zero.it_interval = TV_ZERO;
+
+                    setitimer(ITIMER_REAL, &timout, NULL);
+
+                    int num_bytes = recvfrom(sm.sockfd, &finack, ACCPT_BUFLEN, 0,
+                                             &sm.dest_sock_addr, sm.dest_sock_len);
+
+                    setitimer(ITIMER_REAL, &timout_zero, &timout);
+
+                    if (num_bytes > 0) {
+                        if (finack.type == SYNACK && finack.seqnum == sm.seq_num) {
+                            printf("\n Fin ack recieved.");
+                            // wait or not check
+                            return close(sockfd);
+                        }
+                    }
+                }
+            }
+        }
+
+        if(sm.state==FIN_RCVD){
+            gbnhdr fin_ack;
+            make_finack_pack(&fin_ack, sm.seq_num);
+            int sent = sendto(sockfd, &fin_ack, fin_ack.length, 0, &sm.dest_sock_addr, sm.dest_sock_len);
+            // wait for two timeouts and then close
+            return close(sockfd);
+            //
+        }
+
+
+        if ( sm.state == RST_RCVD ) {
+
+            return close(sockfd);
+
+        }
+
+        return close(sockfd);
     }
-    sm.state = FIN_SENT;
-    //TODO wait with timeout for finack
-    gbnhdr fin;
-//    make_fin_pack();
-    fin.type=FIN;
-    fin.seqnum=sm.seq_num;
-    fin.length=6;
-    sendto(sockfd, &fin, fin.length, 0, &sm.dest_sock_addr, sm.dest_sock_len);
-    return close(sockfd);
-}
+
 
 int gbn_connect(int sockfd, const struct sockaddr *server, socklen_t socklen) {
     //connection message
@@ -436,6 +482,19 @@ void serialize_gbnhdr(gbnhdr *segment, uint8_t *buffer, int *buf_len) {
 
 void make_syn_pack(gbnhdr *seg, int seq_num) {
     gbnhdr segi = {SYN, seq_num, 0, HEADLEN};
+    *seg = segi;
+    seg->checksum = checksum(&seg, 3);
+}
+
+
+void make_fin_pack(gbnhdr *seg, int seq_num) {
+    gbnhdr segi = {FIN, seq_num, 0, HEADLEN};
+    *seg = segi;
+    seg->checksum = checksum(&seg, 3);
+}
+
+void make_finack_pack(gbnhdr *seg, int seq_num) {
+    gbnhdr segi = {FINACK, seq_num, 0, HEADLEN};
     *seg = segi;
     seg->checksum = checksum(&seg, 3);
 }
