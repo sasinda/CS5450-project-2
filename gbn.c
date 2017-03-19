@@ -2,11 +2,14 @@
 
 
 const int ACCPT_BUFLEN = DATALEN + HEADLEN; //1024+48
-char ACCEPT_BUFFER[ACCPT_BUFLEN];
+char ACCEPT_BUFFER[ACCPT_BUFLEN+1];
+const struct timeval TV_VAL = {TIMEOUT, 0};
+const struct timeval TV_ZERO = {0, 0};
+const struct timeval TV_MIN_VAL = {0, 1000};//2nd value is micro seconds. So Min timeout is 1 millis
 
-void make_syn_pack(gbnhdr *seg);
+void make_syn_pack(gbnhdr *seg, int seq_num);
 
-void make_synack_pack(gbnhdr *seg);
+void make_synack_pack(gbnhdr *seg, int seq_num);
 
 void make_data_pack(gbnhdr *seg, const void *buff, size_t len, uint8_t seq_num);
 
@@ -32,9 +35,11 @@ int move_window(struct window_elem *window, int win_len, int sidx);
 
 void settimers(struct window_elem *tot_window, int win_len);
 
-void handle_timeout(int s);
+void handle_timeout(int snum);
 
 void init_window(struct window_elem pElem[2], int i);
+
+int adjust_window_size(int current_size);
 
 state_t sm;
 
@@ -80,103 +85,161 @@ ssize_t gbn_send(int sockfd, const void *buf, size_t len, int flags) {
         while (sidx < len) {
             curr_widx = 0;
             while (curr_widx < win_size) {
+
                 struct window_elem *cwin = &win[curr_widx];
+                struct timeval now;
+                gettimeofday(&now, NULL);
                 if (cwin->buf == NULL) {
+                    //new packet
                     cwin->buf = nxt;
                     cwin->len = -1;
-                    cwin->seq_num=++sm.seq_num;
-                } else if (cwin->data_acked || cwin->exp_on > (unsigned long) time(NULL)) {
+                    cwin->seq_num = sm.seq_num++;
+                    cwin->exp_on = TV_ZERO;
+
+                } else if (cwin->data_acked || timercmp(&cwin->exp_on, &now, >)) {
+                    //either an acked packet not removed from window( cant be)
+                    // or packet is still not yet expired.
                     curr_widx += 1;
                     continue;
+                } else {
+                    //expired packet.
+                    cwin->exp_on = TV_ZERO;//reset expire on
+                    printf("gbn_send: seq: %d timed out. Resending\n", cwin->seq_num);
                 }
 
                 gbnhdr seg;
                 if ((len - sidx) > DATALEN) {
                     make_data_pack(&seg, cwin->buf, DATALEN, cwin->seq_num);
-                    sent += sendto(sockfd, &seg, seg.length, 0, &sm.dest_sock_addr, sm.dest_sock_len);
+                    sent += maybe_sendto(sockfd, &seg, seg.length, 0, &sm.dest_sock_addr, sm.dest_sock_len);
                 } else {
-                    make_data_pack(&seg, cwin->buf, len - sidx,cwin->seq_num);
-                    sent += sendto(sockfd, &seg, seg.length, 0, &sm.dest_sock_addr, sm.dest_sock_len);
+                    make_data_pack(&seg, cwin->buf, len - sidx, cwin->seq_num);
+                    sent += maybe_sendto(sockfd, &seg, seg.length, 0, &sm.dest_sock_addr, sm.dest_sock_len);
                 }
                 if (cwin->len == -1) {
                     cwin->len = seg.length - HEADLEN;
-                    nxt = buf + cwin->len;
+                    nxt = nxt + cwin->len;
                 }
                 cwin->data_acked = false;
                 curr_widx += 1;
             }
-            //Wait for data ack
-            settimers(win, win_size);
+            //Wait for data ack. Sets up the timers internally.
+
             wait_for_dataack(win, win_size);
             sidx = move_window(win, win_size, sidx);
+            win_size = adjust_window_size(win_size);
         }
+        printf("sent %d bytes", sent);
+    } else {
+        printf("Cannot send. Connection state %d", sm.state);
     }
-    printf("sent %d bytes", sent);
     return sent;
+}
+
+int adjust_window_size(int current_size) {
+    int size=current_size;
+    if(sm.num_cont_success>=current_size){
+        size=fmin(2*current_size, MAX_WINDOW_SIZE);
+    }
+    if(sm.num_cont_fail>0){
+        size=1;
+    }
+    if(size>current_size){
+        printf("gbn_send: fast mode");
+    } else if(size<current_size){
+        printf("gbn_send: slow mode");
+    }
+
+    return size;
 }
 
 
 int wait_for_dataack(struct window_elem *window, int win_size) {
+
     struct sockaddr_storage their_addr;
     socklen_t addr_len;
     gbnhdr dataack;
 
+    settimers(window, win_size); //Setup the timers before waiting to recv.
+    int num_bytes = recvfrom(sm.sockfd, &dataack, ACCPT_BUFLEN, 0,
+                             (struct sockaddr *) &their_addr, &addr_len);
 
-    for (int i = 0; i < win_size; i++) {
-        if (!window[i].data_acked) {
-            int num_bytes = recvfrom(sm.sockfd, &dataack, ACCPT_BUFLEN - 1, 0,
-                                     (struct sockaddr *) &their_addr, &addr_len);
-            int j = -1;
-            if (num_bytes > 0 && dataack.type == DATAACK) {
-                while (window[++j].seq_num != dataack.seqnum && j < win_size);
-                if(j<win_size){
-                    window[j].data_acked = true;
-                    sm.num_success += 1;
-                }
-            } else if (num_bytes < 0 && errno == EINTR) {
-                handle_timeout(errno);
-                break;//return to main loop. It'll resend unacked packets
-            }
+    if (num_bytes > 0 && dataack.type == DATAACK) {
+        //TODO range check is wrong, when seq number wraps around.
+        if ( (uint8_t ) (window[0].seq_num+1) <= dataack.seqnum && dataack.seqnum <= (uint8_t)(window[win_size - 1].seq_num + 1)) {
+            int j=0;
+            do {
+                window[j].data_acked = true;
+                sm.num_cont_success += 1;
+                ++j;
+            } while (window[j].seq_num != dataack.seqnum && j < win_size);
+        } else if (window[0].seq_num == dataack.seqnum) {
+            //none of the seg in current window was sent successfully.
+        } else {
+            printf("Got data ack (%d) out of range for the current window.\n", dataack.seqnum);
+            //If it was higher than the current acceptable, i.e a malfunctioning or malicious receiver.
         }
+    } else if (num_bytes < 0 && errno == EINTR) {
+        handle_timeout(errno);
     }
+    //return to main loop in parent func. It'll resend unacked packets
     return 0;
 }
 
 
 ssize_t gbn_recv(int sockfd, void *buf, size_t len, int flags) {
+    //TODO discard out of order and wait.
     gbnhdr data_seg;
     struct sockaddr_storage their_addr;
     socklen_t addr_len;
-    int numbytes = recvfrom(sockfd, &data_seg, ACCPT_BUFLEN - 1, 0,
-                            (struct sockaddr *) &their_addr, &addr_len);
-    int data_len=numbytes;
-    if (numbytes > 0 && data_seg.type == DATA) {
-        if (data_seg.length == numbytes) {
+
+    int data_len = -1;
+    while (1) {
+        int numbytes = recvfrom(sockfd, &data_seg, ACCPT_BUFLEN, 0,
+                                (struct sockaddr *) &their_addr, &addr_len);
+        if (numbytes > 0) {
             gbnhdr data_ack;
-            make_dataack_pack(&data_ack, data_seg.seqnum);
-            //send dataack and the copy data to buffer.
+            if (data_seg.type == DATA && data_seg.seqnum == sm.seq_num) {
+                if (data_seg.length == numbytes) {
+                    sm.seq_num = data_seg.seqnum+1;
+                    make_dataack_pack(&data_ack, sm.seq_num);
+                    //send dataack , copy data to buffer and break.
+                    sendto(sockfd, &data_ack, data_ack.length, 0, &sm.dest_sock_addr, sm.dest_sock_len);
+                    memcpy(buf, data_seg.data, fmin(data_seg.length - HEADLEN, len));
+                    printf("gbn_recv: %d bytes. Sent data ack for seq: %d\n", numbytes, data_ack.seqnum);
+                    data_len = data_seg.length - HEADLEN;
+                    break;
+                }//else :no break. we didnt get the full segment. Or it was corrupted.
+                // Just send a data_ack, saying we still expect this. and keep waiting on receive
+            } else if (numbytes > 0 && data_seg.type == FIN) {
+                sm.state = FIN_RCVD;
+                data_len = 0;
+                break;
+            }//else: ignore out of seq packet or something.
+            //re request for same sm.seq_num. Because we got outof order, or corrupted etc.
+            make_dataack_pack(&data_ack, sm.seq_num);
             sendto(sockfd, &data_ack, data_ack.length, 0, &sm.dest_sock_addr, sm.dest_sock_len);
-            memcpy(buf, data_seg.data, fmin(data_seg.length, len));
-            printf("gbn_recv: %d bytes. Sent data ack\n", numbytes);
-            data_len=data_seg.length-HEADLEN;
-        } else{
-            //some problem with getting data. Don't send the ack. return with a -1 read error.
-            data_len=-1;
+        } else {
+//          error on recv from
+            data_len = -1;
+            break;
         }
-    } else if (numbytes>0 && data_seg.type==FIN){
-        sm.state=FIN_RCVD;
-        data_len=0;
     }
     return data_len;
 }
 
 int gbn_close(int sockfd) {
-    if(sm.state==FIN_RCVD){
+    if (sm.state == FIN_RCVD) {
         //TODO send finack
-//        sendto(sockfd, &data_ack, data_ack.length, 0, &sm.dest_sock_addr, sm.dest_sock_len);
+        //sendto(sockfd, &data_ack, data_ack.length, 0, &sm.dest_sock_addr, sm.dest_sock_len);
     }
-    sm.state=FIN_SENT;
+    sm.state = FIN_SENT;
     //TODO wait with timeout for finack
+    gbnhdr fin;
+//    make_fin_pack();
+    fin.type=FIN;
+    fin.seqnum=sm.seq_num;
+    fin.length=6;
+    sendto(sockfd, &fin, fin.length, 0, &sm.dest_sock_addr, sm.dest_sock_len);
     return close(sockfd);
 }
 
@@ -185,7 +248,7 @@ int gbn_connect(int sockfd, const struct sockaddr *server, socklen_t socklen) {
     // send syn
 
     gbnhdr seg;
-    make_syn_pack(&seg);
+    make_syn_pack(&seg, sm.seq_num++);
     int sent = sendto(sockfd, &seg, seg.length, 0, server, socklen);
     struct sockaddr_storage their_addr;
     socklen_t addr_len;
@@ -198,25 +261,33 @@ int gbn_connect(int sockfd, const struct sockaddr *server, socklen_t socklen) {
         //set timeout
         static struct itimerval timout;
         static struct itimerval timout_zero;
-        static struct timeval val = {2, 1};
-        static  struct timeval zero = {0,0};
+        static struct timeval val = {5, 1};
+        static struct timeval zero = {0, 0};
         timout.it_value = val;
-        timout.it_interval=zero;
-        timout_zero.it_value=zero;
-        timout_zero.it_interval=zero;
+        timout.it_interval = zero;
+        timout_zero.it_value = zero;
+        timout_zero.it_interval = zero;
+
         setitimer(ITIMER_REAL, &timout, NULL);
 
-        numbytes = recvfrom(sockfd, &seg_recv, ACCPT_BUFLEN - 1, 0,
+        numbytes = recvfrom(sockfd, &seg_recv, ACCPT_BUFLEN, 0,
                             (struct sockaddr *) &their_addr, &addr_len);
+
         setitimer(ITIMER_REAL, &timout_zero, &timout);
-        if (numbytes > 0 && seg_recv.type == SYNACK) {
-            printf("recvd  SYNACK. Sending synack for threeway handshake \n", seg_recv.type);
-            gbnhdr seg_sack;
-            make_synack_pack(&seg_sack);
-            sendto(sockfd, &seg_sack, seg_sack.length, 0, server, socklen);
-            sm.state = ESTABLISHED;
+        if (numbytes > 0) {
+            if(seg_recv.type == SYNACK && seg_recv.seqnum == sm.seq_num){
+                printf("recvd  SYNACK. Sending synack for threeway handshake \n", seg_recv.type);
+                gbnhdr seg_sack;
+                make_synack_pack(&seg_sack, sm.seq_num++);
+                sendto(sockfd, &seg_sack, seg_sack.length, 0, server, socklen);
+                sm.state = ESTABLISHED;
+            } else{
+                printf("gbn_connect: Received an unexpected packet. expected SYNACK with seq no %d", sm.seq_num);
+            }
+
         } else {
-            printf("gbn_connect: connection timed out!");
+
+            printf("gbn_connect: Connection timedout!. Error is %s!\n", strerror(errno));
         }
         //else if timeout, sm state is -1, returned;
     }
@@ -234,7 +305,7 @@ int gbn_listen(int sockfd, int backlog) {
     printf("waiting for syn\n");
     addr_len = sizeof their_addr;
     gbnhdr seg;
-    if ((numbytes = recvfrom(sockfd, &seg, ACCPT_BUFLEN - 1, 0,
+    if ((numbytes = recvfrom(sockfd, &seg, ACCPT_BUFLEN, 0,
                              (struct sockaddr *) &their_addr, &addr_len)) == -1) {
         perror("recvfrom");
         exit(1);
@@ -249,9 +320,13 @@ int gbn_listen(int sockfd, int backlog) {
         sm.dest_sock_addr = *(struct sockaddr *) &their_addr;
         sm.dest_sock_len = addr_len;
         sm.state = SYN_RCVD;
+        sm.seq_num = seg.seqnum + 1;
         gbnhdr synack;
-        make_synack_pack(&synack);
+        make_synack_pack(&synack, sm.seq_num);
         sendto(sockfd, &synack, synack.length, 0, &sm.dest_sock_addr, sm.dest_sock_len);
+    } else {
+        printf("listener: expecting a SYN. Client sent %s instead", packet_type_string(seg.type));
+        numbytes = -1;
     }
     return numbytes;
 }
@@ -264,15 +339,19 @@ int gbn_bind(int sockfd, const struct sockaddr *server, socklen_t socklen) {
 
 int gbn_socket(int domain, int type, int protocol) {
 
-    int sockfd=socket(domain, type, protocol);
-    signal(SIGALRM, handle_timeout);
+    int sockfd = socket(domain, type, protocol);
+    struct sigaction sact = {
+            .sa_handler = handle_timeout,
+            .sa_flags = 0,
+    };
+    sigaction(SIGALRM, &sact, NULL);
 
     sm.state = UNKNOWN;
     sm.sockfd = sockfd;
     /*----- Randomizing the seed. This is used by the rand() function -----*/
     srand((unsigned) time(0));
-    sm.seq_num = (uint8_t)rand();
-    return sockfd ;
+    sm.seq_num = (uint8_t) rand();
+    return sockfd;
 }
 
 int gbn_accept(int sockfd, struct sockaddr *client, socklen_t *socklen) {
@@ -284,7 +363,7 @@ int gbn_accept(int sockfd, struct sockaddr *client, socklen_t *socklen) {
     printf("waiting for synack, for the three way handshake\n");
     addr_len = sizeof their_addr;
     gbnhdr synack;
-    if ((numbytes = recvfrom(sockfd, &synack, ACCPT_BUFLEN - 1, 0,
+    if ((numbytes = recvfrom(sockfd, &synack, ACCPT_BUFLEN, 0,
                              (struct sockaddr *) &their_addr, &addr_len)) == -1) {
         perror("error in accept");
         exit(1);
@@ -293,11 +372,16 @@ int gbn_accept(int sockfd, struct sockaddr *client, socklen_t *socklen) {
 
     printf("receiver: packet is %d bytes long\n", numbytes);
     if (numbytes && synack.type == SYNACK) {
-        sm.state = ESTABLISHED;
-        printf("receiver: connection established with %s\n",
-               inet_ntop(their_addr.ss_family,
-                         get_in_addr((struct sockaddr *) &their_addr),
-                         s, sizeof s));
+        if (sm.seq_num == synack.seqnum) {
+            sm.state = ESTABLISHED;
+            sm.seq_num+=1;
+            printf("receiver: connection established with %s\n",
+                   inet_ntop(their_addr.ss_family,
+                             get_in_addr((struct sockaddr *) &their_addr),
+                             s, sizeof s));
+        } else {
+            printf("gbn_accept: error: Client trying to connect is sending a synack with a wrong seq number\n");
+        }
     }
     return (sm.state == ESTABLISHED ? sockfd : -1);
 }
@@ -350,14 +434,14 @@ void serialize_gbnhdr(gbnhdr *segment, uint8_t *buffer, int *buf_len) {
 }
 
 
-void make_syn_pack(gbnhdr *seg) {
-    gbnhdr segi = {SYN, 0, 0, HEADLEN};
+void make_syn_pack(gbnhdr *seg, int seq_num) {
+    gbnhdr segi = {SYN, seq_num, 0, HEADLEN};
     *seg = segi;
     seg->checksum = checksum(&seg, 3);
 }
 
-void make_synack_pack(gbnhdr *seg) {
-    gbnhdr segi = {SYNACK, 0, 0, HEADLEN};
+void make_synack_pack(gbnhdr *seg, int seq_num) {
+    gbnhdr segi = {SYNACK, seq_num, 0, HEADLEN};
     *seg = segi;
     seg->checksum = checksum(&seg, 3);
 }
@@ -397,26 +481,48 @@ void init_window(struct window_elem *win, int win_len) {
 }
 
 
-void handle_timeout(int s) {
-    printf("Data send timed out! %d", s);
-    //do nothing. just retulrn back to original flow. pack will be recent in the loop, since we have the state in window stlructure.
+void handle_timeout(int snum) {
+    printf("Data send timed out! signum: %d %s\n", snum, sys_signame[snum]);
+    sm.num_cont_success = 0;
+    //reset the num success without timeouts to zero.
+    //Then just return back to original flow. pack will be recent in the loop, since we have the state in window stlructure.
 }
 
-void settimers(struct window_elem* tot_window, int win_len) {
-    static const struct timeval TIMEOUT_T = {TIMEOUT, 0};
-    static struct itimerval timout;
-    timout.it_value = TIMEOUT_T;
+void settimers(struct window_elem *tot_window, int win_len) {
 
+    static struct itimerval timeout;
+    struct timeval now;
+    gettimeofday(&now, NULL);
+    struct timeval nxt_tout = TV_VAL;
     for (int i = 0; i < win_len; i++) {
         struct window_elem *w = &tot_window[i];
         if (!w->data_acked) {
-            w->exp_on = (unsigned long) time(NULL) + TIMEOUT;
-            w->timeout = timout;
+            struct timeval temp;
+            timeradd(&now, &TV_VAL, &temp);
+            if (w->exp_on.tv_sec == 0) {
+                //not yet initialized
+                w->exp_on = temp;
+            } else if (timercmp(&w->exp_on, &now, >)) {
+                timersub(&w->exp_on, &now, &nxt_tout);
+            } else {
+                // we missed a timeout while in the send window loop or maybe right now in here.
+                // Set next timeout to min timeouot, causes sigalarm almost immediately.
+                nxt_tout = TV_MIN_VAL;
+                w->exp_on = now;
+            }
         }
     }
-    getitimer(ITIMER_REAL, &timout);
-
+    if (timercmp(&nxt_tout, &TV_MIN_VAL, <)) {
+        nxt_tout = TV_MIN_VAL;
+    }
+    timeout.it_value = nxt_tout;
+    timeout.it_interval = TV_ZERO;
+    setitimer(ITIMER_REAL, &timeout, NULL);
 }
 
+char *packet_type_string(int type) {
+    static char *names[7] = {"SYN", "SYNACK", "DATA", "DATAACK", "FIN", "FINACK", "RST"};
+    return names[type];
+}
 
 

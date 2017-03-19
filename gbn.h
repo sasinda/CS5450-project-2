@@ -30,7 +30,7 @@ extern int errno;
 #define DATALEN   1024    /* length of the payload                       */
 #define HEADLEN   6    /* length of the header in bytes                      */
 #define N         1024    /* Max number of packets a single call to gbn_send can process */
-#define TIMEOUT      1    /* timeout to resend packets (1 second)        */
+#define TIMEOUT      2    /* timeout to resend packets (1 second)        */
 
 #define MAX_WINDOW_SIZE 2
 
@@ -44,6 +44,7 @@ extern int errno;
 #define FINACK   5        /* Acknowledgement of the FIN packet           */
 #define RST      6        /* Reset packet used to reject new connections */
 
+
 /*----- Go-Back-n packet format -----*/
 typedef struct {
 	uint8_t  type;            /* packet type (e.g. SYN, DATA, ACK, FIN)     */
@@ -56,8 +57,9 @@ typedef struct {
 typedef struct state_t{
 	uint8_t state;
 	int sockfd;
-	uint8_t seq_num;
-	int num_success;
+	uint8_t seq_num;//contains the next seq num to send a packet with, or the next expected seq num
+	int num_cont_success;
+	int num_cont_fail;
     struct sockaddr my_sock_addr;
     socklen_t my_sock_len;
     struct sockaddr dest_sock_addr;
@@ -70,8 +72,7 @@ typedef struct window_elem{
 	void *buf;
 	int  len;
 	uint8_t seq_num;
-	unsigned long exp_on;
-	struct itimerval timeout;
+	struct timeval exp_on;
 	bool data_acked;
 };
 
@@ -104,4 +105,7 @@ uint16_t checksum(uint16_t *buf, int nwords);
 
 
 void deserialize_gbnhdr(const uint8_t* buffer, const int* buf_len,  gbnhdr *segment);
+
+char* packet_type_string(int type);
+
 #endif
