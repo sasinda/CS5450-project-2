@@ -55,12 +55,12 @@ void *get_in_addr(struct sockaddr *sa) {
 }
 
 
-uint16_t checksum(uint16_t *buf, int nwords) {
+uint16_t checksum(uint8_t *buf, int nwords) {
     uint32_t sum;
     for (sum = 0; nwords > 0; nwords--)
         sum += *buf++;
-    sum = (sum >> 16) + (sum & 0xffff);
-    sum += (sum >> 16);
+    sum = (sum >> 8) + (sum & 0xff);
+    sum += (sum >> 8);
     return ~sum;
 }
 
@@ -216,7 +216,10 @@ ssize_t gbn_recv(int sockfd, void *buf, size_t len, int flags) {
                                 (struct sockaddr *) &their_addr, &addr_len);
         if (numbytes > 0) {
             gbnhdr data_ack;
-            if (data_seg.type == DATA && data_seg.seqnum == sm.seq_num) {
+            uint32_t  csum;
+            csum = checksum(&data_seg, data_seg.length);
+
+            if (data_seg.type == DATA && data_seg.seqnum == sm.seq_num && csum == data_seg.checksum) {
                 if (data_seg.length == numbytes) {
                     sm.seq_num = data_seg.seqnum + 1;
                     make_dataack_pack(&data_ack, sm.seq_num);
@@ -497,26 +500,26 @@ void serialize_gbnhdr(gbnhdr *segment, uint8_t *buffer, int *buf_len) {
 void make_syn_pack(gbnhdr *seg, int seq_num) {
     gbnhdr segi = {SYN, seq_num, 0, HEADLEN};
     *seg = segi;
-    seg->checksum = checksum(&seg, 3);
+    seg->checksum = checksum(&seg, 6);
 }
 
 
 void make_fin_pack(gbnhdr *seg, int seq_num) {
     gbnhdr segi = {FIN, seq_num, 0, HEADLEN};
     *seg = segi;
-    seg->checksum = checksum(&seg, 3);
+    seg->checksum = checksum(&seg, 6);
 }
 
 void make_finack_pack(gbnhdr *seg, int seq_num) {
     gbnhdr segi = {FINACK, seq_num, 0, HEADLEN};
     *seg = segi;
-    seg->checksum = checksum(&seg, 3);
+    seg->checksum = checksum(&seg, 6);
 }
 
 void make_synack_pack(gbnhdr *seg, int seq_num) {
     gbnhdr segi = {SYNACK, seq_num, 0, HEADLEN};
     *seg = segi;
-    seg->checksum = checksum(&seg, 3);
+    seg->checksum = checksum(&seg, 6);
 }
 
 void make_data_pack(gbnhdr *seg, const void *buff, size_t len, uint8_t seq_num) {
@@ -524,11 +527,14 @@ void make_data_pack(gbnhdr *seg, const void *buff, size_t len, uint8_t seq_num) 
     *seg = segi;
     memcpy(seg->data, buff, len);
     seg->length += len;
+    seg->checksum = checksum(&seg, len);
+
 }
 
 gbnhdr make_dataack_pack(gbnhdr *seg, uint8_t seq_num) {
     gbnhdr segi = {DATAACK, seq_num, 0, HEADLEN};
     *seg = segi;
+    seg->checksum = checksum(&seg,6);
 }
 
 int move_window(struct window_elem *window, int win_len, int sidx) {
