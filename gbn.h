@@ -83,7 +83,8 @@ enum {
 	SYN_RCVD,
 	ESTABLISHED,
 	FIN_SENT,
-	FIN_RCVD
+	FIN_RCVD,
+	RST_RCVD
 };
 
 extern state_t sm;
