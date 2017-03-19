@@ -102,7 +102,7 @@ ssize_t gbn_recv(int sockfd, void *buf, size_t len, int flags);
 ssize_t  maybe_sendto(int  s, const void *buf, size_t len, int flags, \
                       const struct sockaddr *to, socklen_t tolen);
 
-uint16_t checksum(uint16_t *buf, int nwords);
+uint16_t checksum(uint8_t *buf, int nwords);
 
 
 void deserialize_gbnhdr(const uint8_t* buffer, const int* buf_len,  gbnhdr *segment);
