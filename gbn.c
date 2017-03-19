@@ -1,6 +1,5 @@
 #include "gbn.h"
 
-
 const int ACCPT_BUFLEN = DATALEN + HEADLEN; //1024+48
 char ACCEPT_BUFFER[ACCPT_BUFLEN+1];
 const struct timeval TV_VAL = {TIMEOUT, 0};
@@ -75,14 +74,15 @@ ssize_t gbn_send(int sockfd, const void *buf, size_t len, int flags) {
     int sent = -1;
     if (sm.state == ESTABLISHED) {
         sent = 0;
-        int sidx = 0;
+        int confirmed_idx = 0;
+        int sent_idx=0;
         void *nxt = buf;
         int curr_widx = 0;
         struct window_elem win[MAX_WINDOW_SIZE];
         init_window(win, MAX_WINDOW_SIZE);
         int win_size = 1;
 
-        while (sidx < len) {
+        while (confirmed_idx < len) {
             curr_widx = 0;
             while (curr_widx < win_size) {
 
@@ -92,9 +92,20 @@ ssize_t gbn_send(int sockfd, const void *buf, size_t len, int flags) {
                 if (cwin->buf == NULL) {
                     //new packet
                     cwin->buf = nxt;
-                    cwin->len = -1;
                     cwin->seq_num = sm.seq_num++;
                     cwin->exp_on = TV_ZERO;
+                    if ((len - sent_idx) >= DATALEN) {
+                        cwin->buf_len=DATALEN;
+                    } else {
+                        cwin->buf_len=len - sent_idx;
+                    }
+                    if(cwin->buf_len==0){
+                        cwin->buf=NULL;
+                        curr_widx += 1;
+                        continue;
+                    }
+                    nxt = nxt + cwin->buf_len;
+                    sent_idx +=cwin->buf_len;
 
                 } else if (cwin->data_acked || timercmp(&cwin->exp_on, &now, >)) {
                     //either an acked packet not removed from window( cant be)
@@ -106,26 +117,15 @@ ssize_t gbn_send(int sockfd, const void *buf, size_t len, int flags) {
                     cwin->exp_on = TV_ZERO;//reset expire on
                     printf("gbn_send: seq: %d timed out. Resending\n", cwin->seq_num);
                 }
-
                 gbnhdr seg;
-                if ((len - sidx) > DATALEN) {
-                    make_data_pack(&seg, cwin->buf, DATALEN, cwin->seq_num);
-                    sent += maybe_sendto(sockfd, &seg, seg.length, 0, &sm.dest_sock_addr, sm.dest_sock_len);
-                } else {
-                    make_data_pack(&seg, cwin->buf, len - sidx, cwin->seq_num);
-                    sent += maybe_sendto(sockfd, &seg, seg.length, 0, &sm.dest_sock_addr, sm.dest_sock_len);
-                }
-                if (cwin->len == -1) {
-                    cwin->len = seg.length - HEADLEN;
-                    nxt = nxt + cwin->len;
-                }
+                make_data_pack(&seg, cwin->buf, cwin->buf_len, cwin->seq_num);
+                maybe_sendto(sockfd, &seg, seg.length, 0, &sm.dest_sock_addr, sm.dest_sock_len);
                 cwin->data_acked = false;
                 curr_widx += 1;
             }
             //Wait for data ack. Sets up the timers internally.
-
             wait_for_dataack(win, win_size);
-            sidx = move_window(win, win_size, sidx);
+            confirmed_idx = move_window(win, win_size, confirmed_idx);
             win_size = adjust_window_size(win_size);
         }
         printf("sent %d bytes", sent);
@@ -144,9 +144,9 @@ int adjust_window_size(int current_size) {
         size=1;
     }
     if(size>current_size){
-        printf("gbn_send: fast mode");
+        printf("gbn_send: fast mode. Win Size %d \n", size);
     } else if(size<current_size){
-        printf("gbn_send: slow mode");
+        printf("gbn_send: slow mode. Win Size %d \n", size);
     }
 
     return size;
@@ -165,7 +165,9 @@ int wait_for_dataack(struct window_elem *window, int win_size) {
 
     if (num_bytes > 0 && dataack.type == DATAACK) {
         //TODO range check is wrong, when seq number wraps around.
-        if ( (uint8_t ) (window[0].seq_num+1) <= dataack.seqnum && dataack.seqnum <= (uint8_t)(window[win_size - 1].seq_num + 1)) {
+        uint8_t w_start=(uint8_t ) (window[0].seq_num+1);
+        uint8_t w_end=(uint8_t)(window[win_size - 1].seq_num + 1);
+        if (  w_start <= dataack.seqnum && dataack.seqnum <=255 && 0<= dataack.seqnum && dataack.seqnum<= w_end) {
             int j=0;
             do {
                 window[j].data_acked = true;
@@ -175,13 +177,13 @@ int wait_for_dataack(struct window_elem *window, int win_size) {
         } else if (window[0].seq_num == dataack.seqnum) {
             //none of the seg in current window was sent successfully.
         } else {
-            printf("Got data ack (%d) out of range for the current window.\n", dataack.seqnum);
+            printf("Got data ack (%d) out of range for the current window. %d to %d expected.\n", dataack.seqnum, w_start, w_end);
             //If it was higher than the current acceptable, i.e a malfunctioning or malicious receiver.
         }
     } else if (num_bytes < 0 && errno == EINTR) {
-        handle_timeout(errno);
+        //We timed out.
+        //just return to main loop in parent func. It'll resend unacked packets
     }
-    //return to main loop in parent func. It'll resend unacked packets
     return 0;
 }
 
@@ -194,7 +196,7 @@ ssize_t gbn_recv(int sockfd, void *buf, size_t len, int flags) {
 
     int data_len = -1;
     while (1) {
-        int numbytes = recvfrom(sockfd, &data_seg, ACCPT_BUFLEN, 0,
+        int numbytes = recvfrom(sockfd, &data_seg, fmin(ACCPT_BUFLEN, len+HEADLEN), 0,
                                 (struct sockaddr *) &their_addr, &addr_len);
         if (numbytes > 0) {
             gbnhdr data_ack;
@@ -204,7 +206,7 @@ ssize_t gbn_recv(int sockfd, void *buf, size_t len, int flags) {
                     make_dataack_pack(&data_ack, sm.seq_num);
                     //send dataack , copy data to buffer and break.
                     sendto(sockfd, &data_ack, data_ack.length, 0, &sm.dest_sock_addr, sm.dest_sock_len);
-                    memcpy(buf, data_seg.data, fmin(data_seg.length - HEADLEN, len));
+                    memcpy(buf, data_seg.data, fmin(data_seg.length, len + HEADLEN));
                     printf("gbn_recv: %d bytes. Sent data ack for seq: %d\n", numbytes, data_ack.seqnum);
                     data_len = data_seg.length - HEADLEN;
                     break;
@@ -461,7 +463,7 @@ gbnhdr make_dataack_pack(gbnhdr *seg, uint8_t seq_num) {
 int move_window(struct window_elem *window, int win_len, int sidx) {
     int i = 0;
     while (window[i].buf != NULL && window[i].data_acked == true && i < win_len) {
-        sidx += window[i].len;
+        sidx += window[i].buf_len;
         window[i++].buf = NULL;
     }
     int j;
@@ -475,7 +477,7 @@ int move_window(struct window_elem *window, int win_len, int sidx) {
 void init_window(struct window_elem *win, int win_len) {
     for (int i = 0; i < win_len; i++) {
         win[i].buf = NULL;
-        win[i].len = -1;
+        win[i].buf_len = -1;
         win[i].data_acked = false;
     }
 }

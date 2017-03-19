@@ -57,7 +57,7 @@ int main(int argc, char *argv[])
 	
 	/*----- Reading from the socket and dumping it to the file -----*/
 	while(1){
-		if ((numRead = gbn_recv(newSockfd, buf, DATALEN+HEADLEN, 0)) == -1){
+		if ((numRead = gbn_recv(newSockfd, buf, DATALEN, 0)) == -1){
 			perror("gbn_recv");
 			exit(-1);
 		}

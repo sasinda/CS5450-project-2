@@ -70,7 +70,7 @@ typedef struct state_t{
 
 typedef struct window_elem{
 	void *buf;
-	int  len;
+	int  buf_len;
 	uint8_t seq_num;
 	struct timeval exp_on;
 	bool data_acked;
