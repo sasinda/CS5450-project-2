@@ -25,7 +25,7 @@ extern int h_errno;
 extern int errno;
 
 /*----- Protocol parameters -----*/
-#define LOSS_PROB 1e-2    /* loss probability                            */
+#define LOSS_PROB 1e-1    /* loss probability                            */
 #define CORR_PROB 1e-3    /* corruption probability                      */
 #define DATALEN   1024    /* length of the payload                       */
 #define HEADLEN   6    /* length of the header in bytes                      */
@@ -50,7 +50,7 @@ typedef struct {
 	uint8_t  type;            /* packet type (e.g. SYN, DATA, ACK, FIN)     */
 	uint8_t  seqnum;          /* sequence number of the packet              */
     uint16_t checksum;        /* header and payload checksum                */
-	uint16_t  length;		  /* length in bytes for the data/payload. */
+	uint16_t  length;		  /* length in bytes for the total packet       */
     uint8_t data[DATALEN];    /* pointer to the payload                     */
 } __attribute__((packed, aligned(1))) gbnhdr;
 

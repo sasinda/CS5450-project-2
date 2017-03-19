@@ -41,7 +41,7 @@ void handle_timeout(int snum);
 
 void init_window(struct window_elem pElem[2], int i);
 
-int adjust_window_size(int current_size);
+int adjust_window_size(struct window_elem* window, int current_size);
 
 state_t sm;
 
@@ -88,8 +88,7 @@ ssize_t gbn_send(int sockfd, const void *buf, size_t len, int flags) {
         while (confirmed_idx < len) {
             curr_widx = 0;
             while (curr_widx < win_size) {
-
-                struct window_elem *cwin = &win[curr_widx];
+                struct window_elem *cwin = &win[curr_widx++];
                 struct timeval now;
                 gettimeofday(&now, NULL);
                 if (cwin->buf == NULL) {
@@ -101,7 +100,6 @@ ssize_t gbn_send(int sockfd, const void *buf, size_t len, int flags) {
                     }
                     if (cwin->buf_len == 0) {
                         cwin->buf = NULL;
-                        curr_widx += 1;
                         continue;
                     }
                     cwin->buf = nxt;
@@ -109,27 +107,25 @@ ssize_t gbn_send(int sockfd, const void *buf, size_t len, int flags) {
                     cwin->seq_num = sm.seq_num++;
                     nxt = nxt + cwin->buf_len;
                     sent_idx += cwin->buf_len;
-
+                    printf("gbn_send: new packet with seq: %d \n", cwin->seq_num);
                 } else if (cwin->data_acked || timercmp(&cwin->exp_on, &now, >)) {
                     //either an acked packet not removed from window( cant be)
                     // or packet is still not yet expired.
-                    curr_widx += 1;
                     continue;
                 } else {
                     //expired packet.
                     cwin->exp_on = TV_ZERO;//reset expire on
-                    printf("gbn_send: seq: %d timed out. Resending\n", cwin->seq_num);
+                    printf("gbn_send: seq: %d had timed out. Resending\n", cwin->seq_num);
                 }
                 gbnhdr seg;
                 make_data_pack(&seg, cwin->buf, cwin->buf_len, cwin->seq_num);
                 maybe_sendto(sockfd, &seg, seg.length, 0, &sm.dest_sock_addr, sm.dest_sock_len);
                 cwin->data_acked = false;
-                curr_widx += 1;
             }
             //Wait for data ack. Sets up the timers internally.
             wait_for_dataack(win, win_size);
             confirmed_idx = move_window(win, win_size, confirmed_idx);
-            win_size = adjust_window_size(win_size);
+            win_size = adjust_window_size(win, win_size);
         }
         sent=confirmed_idx;
         printf("sent %d bytes", sent);
@@ -139,13 +135,19 @@ ssize_t gbn_send(int sockfd, const void *buf, size_t len, int flags) {
     return sent;
 }
 
-int adjust_window_size(int current_size) {
+int adjust_window_size(struct window_elem* window, int current_size) {
     int size = current_size;
     if (sm.num_cont_success >= current_size) {
         size = fmin(2 * current_size, MAX_WINDOW_SIZE);
     }
     if (sm.num_cont_fail > 0) {
         size = 1;
+        //delete the othervalues.
+        for(int i=1; i<current_size; i++){
+            window[i].buf=NULL;
+            window[i].buf_len=-1;
+        }
+        sm.seq_num=window[0].seq_num+1;
     }
     if (size > current_size) {
         printf("gbn_send: fast mode. Win Size %d \n", size);
@@ -169,20 +171,28 @@ int wait_for_dataack(struct window_elem *window, int win_size) {
 
     if (num_bytes > 0 && dataack.type == DATAACK) {
         //TODO range check is wrong, when seq number wraps around.
-        uint8_t w_start = (uint8_t) (window[0].seq_num + 1);
-        uint8_t w_end = (uint8_t) (window[win_size - 1].seq_num + 1);
-        if (w_start <= dataack.seqnum && dataack.seqnum <= 255 && 0 <= dataack.seqnum && dataack.seqnum <= w_end) {
+        uint8_t w_start = (uint8_t) (window[0].seq_num);
+        uint8_t w_end = (uint8_t) (window[win_size - 1].seq_num);
+        bool in_range=true;
+        const uint8_t da_seqnum = dataack.seqnum;
+        if(w_start <= w_end){
+            in_range= (w_start < da_seqnum && da_seqnum <= w_end + 1);
+        } else{
+            in_range=((0 <= da_seqnum && da_seqnum <= w_end + 1) || (w_start < da_seqnum <= 255));
+        }
+        if (in_range) {
             int j = 0;
             do {
                 window[j].data_acked = true;
                 sm.num_cont_success += 1;
                 sm.num_cont_fail=0;
                 ++j;
-            } while (window[j].seq_num != dataack.seqnum && j < win_size);
-        } else if (window[0].seq_num == dataack.seqnum) {
+            } while (window[j].seq_num != da_seqnum && j < win_size);
+            printf("gbn_send: window [%d:%d], data ack %d\n", w_start, w_end, da_seqnum);
+        } else if (window[0].seq_num == da_seqnum) {
             //none of the seg in current window was sent successfully.
         } else {
-            printf("Got data ack (%d) out of range for the current window. %d to %d expected.\n", dataack.seqnum,
+            printf("Got data ack (%d) out of range for the current window. %d to %d expected.\n", da_seqnum,
                    w_start, w_end);
             //If it was higher than the current acceptable, i.e a malfunctioning or malicious receiver.
         }
@@ -400,7 +410,7 @@ int gbn_socket(int domain, int type, int protocol) {
     sm.sockfd = sockfd;
     /*----- Randomizing the seed. This is used by the rand() function -----*/
     srand((unsigned) time(0));
-    sm.seq_num = (uint8_t) rand();
+    sm.seq_num = 250;//(uint8_t) rand();
     return sockfd;
 }
 
