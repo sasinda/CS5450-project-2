@@ -17,6 +17,7 @@ gbnhdr make_dataack_pack(gbnhdr *seg, uint8_t seq_num);
 void make_fin_pack(gbnhdr *seg, int seq_num);
 
 void make_finack_pack(gbnhdr *seg, int seq_num);
+
 /**
  * return the window index to iterate from.
  * @param win
@@ -41,9 +42,11 @@ void handle_timeout(int snum);
 
 void init_window(struct window_elem pElem[2], int i);
 
-int adjust_window_size(struct window_elem* window, int current_size);
+int adjust_window_size(struct window_elem *window, int current_size);
 
-struct window_elem* last_win_elem(struct window_elem* win, int win_size);
+struct window_elem *last_win_elem(struct window_elem *win, int win_size);
+
+bool csum_correct(gbnhdr *ptr);
 
 state_t sm;
 
@@ -59,8 +62,9 @@ void *get_in_addr(struct sockaddr *sa) {
 
 uint16_t checksum(uint8_t *buf, int nwords) {
     uint16_t sum;
-    for (sum = 0; nwords > 0; nwords--)
+    for (sum = 0; nwords > 0; nwords--) {
         sum += *buf++;
+    }
     sum = (sum >> 8) + (sum & 0xff);
     sum += (sum >> 8);
     return ~sum;
@@ -128,14 +132,14 @@ ssize_t gbn_send(int sockfd, const void *buf, size_t len, int flags) {
             wait_for_dataack(win, win_size);
             confirmed_idx += move_window(win, win_size);
             win_size = adjust_window_size(win, win_size);
-            struct window_elem* lst=last_win_elem(win, win_size);
-            if(lst!=NULL && lst->buf!=NULL){
-                nxt=lst->buf+lst->buf_len;
-                nxt_idx=nxt-buf;
+            struct window_elem *lst = last_win_elem(win, win_size);
+            if (lst != NULL && lst->buf != NULL) {
+                nxt = lst->buf + lst->buf_len;
+                nxt_idx = nxt - buf;
             }
 
         }
-        sent=confirmed_idx;
+        sent = confirmed_idx;
         printf("sent %d bytes", sent);
     } else {
         printf("Cannot send. Connection state %d", sm.state);
@@ -143,9 +147,9 @@ ssize_t gbn_send(int sockfd, const void *buf, size_t len, int flags) {
     return sent;
 }
 
-struct window_elem* last_win_elem(struct window_elem* win, int win_size) {
-    for(int i=win_size-1; i>=0; i--){
-        if(win[i].buf!=NULL){
+struct window_elem *last_win_elem(struct window_elem *win, int win_size) {
+    for (int i = win_size - 1; i >= 0; i--) {
+        if (win[i].buf != NULL) {
             return &win[i];
         }
     }
@@ -167,19 +171,19 @@ int wait_for_dataack(struct window_elem *window, int win_size) {
         //TODO range check is wrong, when seq number wraps around.
         uint8_t w_start = (uint8_t) (window[0].seq_num);
         uint8_t w_end = (uint8_t) (window[win_size - 1].seq_num);
-        bool in_range=true;
+        bool in_range = true;
         const uint8_t da_seqnum = dataack.seqnum;
-        if(w_start <= w_end){
-            in_range= (w_start < da_seqnum && da_seqnum <= w_end + 1);
-        } else{
-            in_range=((0 <= da_seqnum && da_seqnum <= w_end + 1) || (w_start < da_seqnum <= 255));
+        if (w_start <= w_end) {
+            in_range = (w_start < da_seqnum && da_seqnum <= w_end + 1);
+        } else {
+            in_range = ((0 <= da_seqnum && da_seqnum <= w_end + 1) || (w_start < da_seqnum <= 255));
         }
         if (in_range) {
             int j = 0;
             do {
                 window[j].data_acked = true;
                 sm.num_cont_success += 1;
-                sm.num_cont_fail=0;
+                sm.num_cont_fail = 0;
                 ++j;
             } while (window[j].seq_num != da_seqnum && j < win_size);
             printf("gbn_send: window [%d:%d], data ack %d\n", w_start, w_end, da_seqnum);
@@ -208,15 +212,10 @@ ssize_t gbn_recv(int sockfd, void *buf, size_t len, int flags) {
     while (1) {
         int numbytes = recvfrom(sockfd, &data_seg, fmin(ACCPT_BUFLEN, len + HEADLEN), 0,
                                 (struct sockaddr *) &their_addr, &addr_len);
-        if (numbytes > 0) {
+        if (numbytes > 0 &&  csum_correct(&data_seg)) {
             gbnhdr data_ack;
-            uint16_t  csum;
-            gbnhdr da = data_seg;
-            da.checksum =0;
 
-            csum = checksum(&da, da.length);
-
-            if (data_seg.type == DATA && data_seg.seqnum == sm.seq_num && csum == data_seg.checksum) {
+            if (data_seg.type == DATA && data_seg.seqnum == sm.seq_num ) {
                 if (data_seg.length == numbytes) {
                     sm.seq_num = data_seg.seqnum + 1;
                     make_dataack_pack(&data_ack, sm.seq_num);
@@ -237,9 +236,7 @@ ssize_t gbn_recv(int sockfd, void *buf, size_t len, int flags) {
             make_dataack_pack(&data_ack, sm.seq_num);
             sendto(sockfd, &data_ack, data_ack.length, 0, &sm.dest_sock_addr, sm.dest_sock_len);
         } else {
-//          error on recv from
-            data_len = -1;
-            break;
+            printf("gbn_recv: Corrupt data! seq?: %d", data_seg.seqnum);
         }
     }
     return data_len;
@@ -249,7 +246,7 @@ int gbn_close(int sockfd) {
 
     if (sm.state == ESTABLISHED) {
         int finsent = 0;
-        uint8_t fin_seq_num=sm.seq_num++;
+        uint8_t fin_seq_num = sm.seq_num++;
         while (finsent < 6) {
 
             finsent++;
@@ -276,14 +273,14 @@ int gbn_close(int sockfd) {
 
                 if (num_bytes > 0) {
                     if (finack.type == FINACK) {
-                        printf("\n Fin ack recieved. Closing Socket. Bye bye!");
+                        printf("\n Fin ack recieved. Closing Socket. Bye bye!\n");
                         // wait or not check
                         return close(sockfd);
                     }
                 }
             }
         }
-        printf("Maximum FIN s retried. Aborting connection without FINACK.");
+        printf("Maximum FIN s retried. Aborting connection without FINACK.\n");
     }
     if (sm.state == FIN_RCVD) {
         gbnhdr fin_ack;
@@ -308,51 +305,69 @@ int gbn_connect(int sockfd, const struct sockaddr *server, socklen_t socklen) {
 
     gbnhdr seg;
     make_syn_pack(&seg, sm.seq_num++);
-    int sent = sendto(sockfd, &seg, seg.length, 0, server, socklen);
-    struct sockaddr_storage their_addr;
-    socklen_t addr_len;
-    int numbytes;
-    addr_len = sizeof their_addr;
-    if (sent) {//wait for syn ack
-        printf("waiting for syn ack\n");
-        gbnhdr seg_recv;
+    int tries = 0;
+    while (tries++ < 5) {
+        int sent = maybe_sendto(sockfd, &seg, seg.length, 0, server, socklen);
+        struct sockaddr_storage their_addr;
+        socklen_t addr_len;
+        int numbytes;
+        addr_len = sizeof their_addr;
+        if (sent) {//wait for syn ack
+            printf("waiting for syn ack\n");
+            gbnhdr seg_recv;
 
-        //set timeout
-        static struct itimerval timout;
-        static struct itimerval timout_zero;
-        static struct timeval val = {5, 1};
-        static struct timeval zero = {0, 0};
-        timout.it_value = val;
-        timout.it_interval = zero;
-        timout_zero.it_value = zero;
-        timout_zero.it_interval = zero;
+            //set timeout
+            static struct itimerval timout;
+            static struct itimerval timout_zero;
+            static struct timeval val = {5, 1};
 
-        setitimer(ITIMER_REAL, &timout, NULL);
+            timout.it_value = val;
+            timout.it_interval = TV_ZERO;
+            timout_zero.it_value = TV_ZERO;
+            timout_zero.it_interval = TV_ZERO;
 
-        numbytes = recvfrom(sockfd, &seg_recv, ACCPT_BUFLEN, 0,
-                            (struct sockaddr *) &their_addr, &addr_len);
+            setitimer(ITIMER_REAL, &timout, NULL);
 
-        setitimer(ITIMER_REAL, &timout_zero, &timout);
-        if (numbytes > 0) {
-            if (seg_recv.type == SYNACK && seg_recv.seqnum == sm.seq_num) {
-                printf("recvd  SYNACK. Sending synack for threeway handshake \n", seg_recv.type);
-                gbnhdr seg_sack;
-                make_synack_pack(&seg_sack, sm.seq_num++);
-                sendto(sockfd, &seg_sack, seg_sack.length, 0, server, socklen);
-                sm.state = ESTABLISHED;
+            numbytes = recvfrom(sockfd, &seg_recv, ACCPT_BUFLEN, 0,
+                                (struct sockaddr *) &their_addr, &addr_len);
+            setitimer(ITIMER_REAL, &timout_zero, &timout);
+
+            if (numbytes > 0 && csum_correct(&seg_recv)) {
+                if (seg_recv.type == SYNACK && seg_recv.seqnum == sm.seq_num) {
+                    printf("recvd  SYNACK. Sending synack for threeway handshake \n", seg_recv.type);
+                    gbnhdr seg_sack;
+                    make_synack_pack(&seg_sack, sm.seq_num++);
+                    maybe_sendto(sockfd, &seg_sack, seg_sack.length, 0, server, socklen);
+                    sm.state = ESTABLISHED;
+                    sm.dest_sock_addr = *server;
+                    sm.dest_sock_len = socklen;
+                    break;
+                } else if (seg_recv.type == RST && seg_recv.seqnum == sm.seq_num) {
+                    sm.state = RST_RCVD;
+                    sleep(1);
+                    continue;
+                } else {
+                    printf("gbn_connect: Received an unexpected packet. expected SYNACK with seq no %d", sm.seq_num);
+                    continue;
+                }
             } else {
-                printf("gbn_connect: Received an unexpected packet. expected SYNACK with seq no %d", sm.seq_num);
+                printf("gbn_connect: No data or Corrupted data. Error %s!\n", strerror(errno));
             }
-
-        } else {
-
-            printf("gbn_connect: Connection timedout!. Error is %s!\n", strerror(errno));
+            //else if timeout, sm state is -1, returned;
         }
-        //else if timeout, sm state is -1, returned;
     }
-    sm.dest_sock_addr = *server;
-    sm.dest_sock_len = socklen;
+    if(sm.state!=ESTABLISHED){
+        printf("gbn_connect: Connection timedout!. Max retries exceeded. Error is %s!\n", strerror(errno));
+    }
     return sm.state;
+}
+
+bool csum_correct(gbnhdr *seg) {
+    int orig = seg->checksum;
+    seg->checksum = 0;
+    bool ans = orig == checksum(seg, seg->length);
+    seg->checksum = orig;
+    return ans;
 }
 
 int gbn_listen(int sockfd, int backlog) {
@@ -364,28 +379,30 @@ int gbn_listen(int sockfd, int backlog) {
     printf("waiting for syn\n");
     addr_len = sizeof their_addr;
     gbnhdr seg;
-    if ((numbytes = recvfrom(sockfd, &seg, ACCPT_BUFLEN, 0,
-                             (struct sockaddr *) &their_addr, &addr_len)) == -1) {
-        perror("recvfrom");
-        exit(1);
-    }
 
-    printf("listener: got packet from %s\n",
-           inet_ntop(their_addr.ss_family,
-                     get_in_addr((struct sockaddr *) &their_addr),
-                     s, sizeof s));
-    printf("listener: packet is %d bytes long\n", numbytes);
-    if (seg.type == SYN) {
-        sm.dest_sock_addr = *(struct sockaddr *) &their_addr;
-        sm.dest_sock_len = addr_len;
-        sm.state = SYN_RCVD;
-        sm.seq_num = seg.seqnum + 1;
-        gbnhdr synack;
-        make_synack_pack(&synack, sm.seq_num);
-        sendto(sockfd, &synack, synack.length, 0, &sm.dest_sock_addr, sm.dest_sock_len);
-    } else {
-        printf("listener: expecting a SYN. Client sent %s instead", packet_type_string(seg.type));
-        numbytes = -1;
+    while (sm.state!=SYN_RCVD){
+        numbytes = recvfrom(sockfd, &seg, ACCPT_BUFLEN, 0,
+                            (struct sockaddr *) &their_addr, &addr_len);
+
+        if(numbytes>0 && csum_correct(&seg)){
+            printf("listener: got packet from %s\n",
+                   inet_ntop(their_addr.ss_family,
+                             get_in_addr((struct sockaddr *) &their_addr),
+                             s, sizeof s));
+            printf("listener: packet is %d bytes long\n", numbytes);
+            if (seg.type == SYN) {
+                sm.dest_sock_addr = *(struct sockaddr *) &their_addr;
+                sm.dest_sock_len = addr_len;
+                sm.state = SYN_RCVD;
+                sm.seq_num = seg.seqnum + 1;
+                gbnhdr synack;
+                make_synack_pack(&synack, sm.seq_num);
+                maybe_sendto(sockfd, &synack, synack.length, 0, &sm.dest_sock_addr, sm.dest_sock_len);
+            } else {
+                printf("listener: expecting a SYN. Client sent %s instead\n", packet_type_string(seg.type));
+                numbytes = -1;
+            }
+        }
     }
     return numbytes;
 }
@@ -409,37 +426,66 @@ int gbn_socket(int domain, int type, int protocol) {
     sm.sockfd = sockfd;
     /*----- Randomizing the seed. This is used by the rand() function -----*/
     srand((unsigned) time(0));
-    sm.seq_num = 250;//(uint8_t) rand();
+    sm.seq_num = 0;//(uint8_t) rand();
     return sockfd;
 }
 
 int gbn_accept(int sockfd, struct sockaddr *client, socklen_t *socklen) {
-    struct sockaddr_storage their_addr;
-    socklen_t addr_len;
-    char s[INET6_ADDRSTRLEN];
-    int numbytes;
+    if (sm.state == SYN_RCVD) {
+        struct sockaddr_storage their_addr;
+        socklen_t addr_len;
+        char s[INET6_ADDRSTRLEN];
+        int numbytes;
 
-    printf("waiting for synack, for the three way handshake\n");
-    addr_len = sizeof their_addr;
-    gbnhdr synack;
-    if ((numbytes = recvfrom(sockfd, &synack, ACCPT_BUFLEN, 0,
-                             (struct sockaddr *) &their_addr, &addr_len)) == -1) {
-        perror("error in accept");
-        exit(1);
-    }
-
-
-    printf("receiver: packet is %d bytes long\n", numbytes);
-    if (numbytes && synack.type == SYNACK) {
-        if (sm.seq_num == synack.seqnum) {
-            sm.state = ESTABLISHED;
-            sm.seq_num += 1;
-            printf("receiver: connection established with %s\n",
-                   inet_ntop(their_addr.ss_family,
-                             get_in_addr((struct sockaddr *) &their_addr),
-                             s, sizeof s));
-        } else {
-            printf("gbn_accept: error: Client trying to connect is sending a synack with a wrong seq number\n");
+        printf("waiting for synack, for the three way handshake\n");
+        addr_len = sizeof their_addr;
+        gbnhdr packet;
+        while (1) {
+            numbytes = recvfrom(sockfd, &packet, ACCPT_BUFLEN, MSG_PEEK,
+                                     (struct sockaddr *) &their_addr, &addr_len);
+            printf("receiver: packet is %d bytes long\n", numbytes);
+            if (numbytes > 0 && csum_correct(&packet)) {
+                if (packet.type == DATA) {
+                    //i.e 3rd ack from sender lost. My ack(2) was sent so the client(sender) assumes
+                    // connection is establised, and is sending data.
+                    //Just exit accept.
+                    sm.state = ESTABLISHED;
+                    sm.seq_num += 1;
+                    printf("gbn_accept:Data recevied instead of synack in 3way.\n");
+                    printf("gbn_accept: connection established with %s\n",
+                           inet_ntop(their_addr.ss_family,
+                                     get_in_addr((struct sockaddr *) &their_addr),
+                                     s, sizeof s));
+                    break;
+                }
+                //consume peeked massege.
+                numbytes = recvfrom(sockfd, &packet, ACCPT_BUFLEN, 0,
+                                    (struct sockaddr *) &their_addr, &addr_len);
+                if (packet.type == SYNACK) {
+                    //happy scenario
+                    if (sm.seq_num == packet.seqnum) {
+                        sm.state = ESTABLISHED;
+                        sm.seq_num += 1;
+                        printf("gbn_accept: ideal scenario\n");
+                        printf("receiver: connection established with %s\n",
+                               inet_ntop(their_addr.ss_family,
+                                         get_in_addr((struct sockaddr *) &their_addr),
+                                         s, sizeof s));
+                        break;
+                    } else {
+                        printf("gbn_accept: error: Client trying to connect is sending a synack with a wrong seq number\n");
+                    }
+                } else if (packet.type == SYN) {
+                    //resend synack
+                    printf("gbn_accept: received a syn again. Lost synack. repeating synack.\n");
+                    gbnhdr synack;
+                    make_synack_pack(&synack, sm.seq_num);
+                    maybe_sendto(sockfd, &synack, synack.length, 0, &sm.dest_sock_addr, sm.dest_sock_len);
+                    continue;
+                }
+            } else{
+                printf("gbn_accept: corrupted packet. looping again");
+            }
         }
     }
     return (sm.state == ESTABLISHED ? sockfd : -1);
@@ -496,26 +542,26 @@ void serialize_gbnhdr(gbnhdr *segment, uint8_t *buffer, int *buf_len) {
 void make_syn_pack(gbnhdr *seg, int seq_num) {
     gbnhdr segi = {SYN, seq_num, 0, HEADLEN};
     *seg = segi;
-    seg->checksum = checksum(&seg, 6);
+    seg->checksum = checksum(seg, 6);
 }
 
 
 void make_fin_pack(gbnhdr *seg, int seq_num) {
     gbnhdr segi = {FIN, seq_num, 0, HEADLEN};
     *seg = segi;
-    seg->checksum = checksum(&seg, 6);
+    seg->checksum = checksum(seg, 6);
 }
 
 void make_finack_pack(gbnhdr *seg, int seq_num) {
     gbnhdr segi = {FINACK, seq_num, 0, HEADLEN};
     *seg = segi;
-    seg->checksum = checksum(&seg, 6);
+    seg->checksum = checksum(seg, 6);
 }
 
 void make_synack_pack(gbnhdr *seg, int seq_num) {
     gbnhdr segi = {SYNACK, seq_num, 0, HEADLEN};
     *seg = segi;
-    seg->checksum = checksum(&seg, 6);
+    seg->checksum = checksum(seg, 6);
 }
 
 void make_data_pack(gbnhdr *seg, const void *buff, size_t len, uint8_t seq_num) {
@@ -523,21 +569,20 @@ void make_data_pack(gbnhdr *seg, const void *buff, size_t len, uint8_t seq_num) 
     *seg = segi;
     memcpy(seg->data, buff, len);
     seg->length += len;
-    seg->checksum = checksum(&seg, len);
-
+    seg->checksum = checksum(seg, seg->length);
 }
 
 gbnhdr make_dataack_pack(gbnhdr *seg, uint8_t seq_num) {
     gbnhdr segi = {DATAACK, seq_num, 0, HEADLEN};
     *seg = segi;
-    seg->checksum = checksum(&seg,6);
+    seg->checksum = checksum(seg, 6);
 }
 
 int move_window(struct window_elem *window, int win_len) {
-    int acked_data_amt=0;
+    int acked_data_amt = 0;
     int i = 0;
     while (window[i].buf != NULL && window[i].data_acked == true && i < win_len) {
-        printf("gbn_send: kicked out of win frame. seq: %d\n", window[i].seq_num);
+//        printf("gbn_send: kicked out of win frame. seq: %d\n", window[i].seq_num);
         acked_data_amt += window[i].buf_len;
         window[i++].buf = NULL;
 
@@ -551,7 +596,7 @@ int move_window(struct window_elem *window, int win_len) {
     return acked_data_amt;
 }
 
-int adjust_window_size(struct window_elem* window, int current_size) {
+int adjust_window_size(struct window_elem *window, int current_size) {
     int size = current_size;
     if (sm.num_cont_success >= current_size) {
         size = fmin(2 * current_size, MAX_WINDOW_SIZE);
@@ -559,11 +604,11 @@ int adjust_window_size(struct window_elem* window, int current_size) {
     if (sm.num_cont_fail > 0) {
         size = 1;
         //delete the othervalues.
-        for(int i=1; i<current_size; i++){
-            window[i].buf=NULL;
-            window[i].buf_len=-1;
+        for (int i = 1; i < current_size; i++) {
+            window[i].buf = NULL;
+            window[i].buf_len = -1;
         }
-        sm.seq_num=window[0].seq_num+1;
+        sm.seq_num = window[0].seq_num + 1;
     }
     if (size > current_size) {
         printf("gbn_send: fast mode. Win Size %d \n", size);
@@ -585,7 +630,7 @@ void init_window(struct window_elem *win, int win_len) {
 void handle_timeout(int snum) {
     printf("SIGALRM signum: %d %s\n", snum, sys_signame[snum]);
     sm.num_cont_success = 0;
-    sm.num_cont_fail+=1;
+    sm.num_cont_fail += 1;
     //reset the num success without timeouts to zero.
     //Then just return back to original flow. pack will be recent in the loop, since we have the state in window stlructure.
 }
