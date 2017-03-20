@@ -19,12 +19,12 @@
 # along with this program; if not, write to the Free Software
 # Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
 
-CC              = gcc -std=c99
-LD              = gcc -std=c99
+CC              = gcc
+LD              = gcc
 AR              = ar
 
-CFLAGS          = -Wall -ansi 
-LFLAGS          = -Wall -ansi
+CFLAGS          = -std=c99 -Wall -ansi
+LFLAGS          = -std=c99 -Wall -ansi
 
 SENDEROBJS		= sender.o gbn.o
 RECEIVEROBJS	= receiver.o gbn.o
