@@ -120,7 +120,8 @@ ssize_t gbn_send(int sockfd, const void *buf, size_t len, int flags) {
                     continue;
                 } else {
                     //expired packet.
-                    cwin->exp_on = TV_ZERO;//reset expire on
+                    cwin->exp_on = TV_ZERO;
+                    //reset expire on
                     printf("gbn_send: seq: %d had timed out. Resending\n", cwin->seq_num);
                 }
                 gbnhdr seg;
@@ -163,7 +164,8 @@ int wait_for_dataack(struct window_elem *window, int win_size) {
     socklen_t addr_len;
     gbnhdr dataack;
 
-    settimers(window, win_size); //Setup the timers before waiting to recv.
+    //Setup the timers before waiting to recv.
+    settimers(window, win_size);
     int num_bytes = recvfrom(sm.sockfd, &dataack, ACCPT_BUFLEN, 0,
                              (struct sockaddr *) &their_addr, &addr_len);
 
@@ -225,13 +227,15 @@ ssize_t gbn_recv(int sockfd, void *buf, size_t len, int flags) {
                     printf("gbn_recv: %d bytes. Sent data ack for seq: %d\n", numbytes, data_ack.seqnum);
                     data_len = data_seg.length - HEADLEN;
                     break;
-                }//else :no break. we didnt get the full segment. Or it was corrupted.
+                }
+                //else :no break. we didnt get the full segment. Or it was corrupted.
                 // Just send a data_ack, saying we still expect this. and keep waiting on receive
             } else if (numbytes > 0 && data_seg.type == FIN) {
                 sm.state = FIN_RCVD;
                 data_len = 0;
                 break;
-            }//else: ignore out of seq packet or something.
+            }
+            //else: ignore out of seq packet or something.
             //re request for same sm.seq_num. Because we got outof order, or corrupted etc.
             make_dataack_pack(&data_ack, sm.seq_num);
             sendto(sockfd, &data_ack, data_ack.length, 0, &sm.dest_sock_addr, sm.dest_sock_len);

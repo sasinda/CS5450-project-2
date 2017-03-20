@@ -58,7 +58,8 @@ typedef struct {
 typedef struct state_t{
 	uint8_t state;
 	int sockfd;
-	uint8_t seq_num;//contains the next seq num to send a packet with, or the next expected seq num
+	uint8_t seq_num;
+    //contains the next seq num to send a packet with, or the next expected seq num
 	int num_cont_success;
 	int num_cont_fail;
     struct sockaddr my_sock_addr;
