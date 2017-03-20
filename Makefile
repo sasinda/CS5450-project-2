@@ -23,8 +23,8 @@ CC              = gcc
 LD              = gcc
 AR              = ar
 
-CFLAGS          = -std=c99 -Wall -ansi
-LFLAGS          = -std=c99 -Wall -ansi
+CFLAGS          =  -Wall
+LFLAGS          =  -Wall
 
 SENDEROBJS		= sender.o gbn.o
 RECEIVEROBJS	= receiver.o gbn.o
