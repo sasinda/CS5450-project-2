@@ -1,7 +1,7 @@
 #include "gbn.h"
 
 const int ACCPT_BUFLEN = DATALEN + HEADLEN; //1024+48
-char ACCEPT_BUFFER[ACCPT_BUFLEN + 1];
+
 const struct timeval TV_VAL = {TIMEOUT, 0};
 const struct timeval TV_ZERO = {0, 0};
 const struct timeval TV_MIN_VAL = {0, 1000};//2nd value is micro seconds. So Min timeout is 1 millis
@@ -632,7 +632,7 @@ void init_window(struct window_elem *win, int win_len) {
 
 
 void handle_timeout(int snum) {
-    printf("SIGALRM signum: %d %s\n", snum, sys_signame[snum]);
+    printf("SIGALRM signum: %d\n", snum);
     sm.num_cont_success = 0;
     sm.num_cont_fail += 1;
     //reset the num success without timeouts to zero.
