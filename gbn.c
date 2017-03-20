@@ -33,7 +33,7 @@ int wait_for_dataack(struct window_elem *win, int win_size);
  * @param sidx to return the last data successfully sent without gaps
  * @return sidx last data successfully sent without gaps
  */
-int move_window(struct window_elem *window, int win_len, int sidx);
+int move_window(struct window_elem *window, int win_len);
 
 void settimers(struct window_elem *tot_window, int win_len);
 
@@ -42,6 +42,8 @@ void handle_timeout(int snum);
 void init_window(struct window_elem pElem[2], int i);
 
 int adjust_window_size(struct window_elem* window, int current_size);
+
+struct window_elem* last_win_elem(struct window_elem* win, int win_size);
 
 state_t sm;
 
@@ -78,7 +80,7 @@ ssize_t gbn_send(int sockfd, const void *buf, size_t len, int flags) {
     if (sm.state == ESTABLISHED) {
         sent = 0;
         int confirmed_idx = 0;
-        int sent_idx = 0;
+        int nxt_idx = 0;
         void *nxt = buf;
         int curr_widx = 0;
         struct window_elem win[MAX_WINDOW_SIZE];
@@ -93,10 +95,10 @@ ssize_t gbn_send(int sockfd, const void *buf, size_t len, int flags) {
                 gettimeofday(&now, NULL);
                 if (cwin->buf == NULL) {
                     //new packet
-                    if ((len - sent_idx) >= DATALEN) {
+                    if ((len - nxt_idx) >= DATALEN) {
                         cwin->buf_len = DATALEN;
                     } else {
-                        cwin->buf_len = len - sent_idx;
+                        cwin->buf_len = len - nxt_idx;
                     }
                     if (cwin->buf_len == 0) {
                         cwin->buf = NULL;
@@ -106,8 +108,8 @@ ssize_t gbn_send(int sockfd, const void *buf, size_t len, int flags) {
                     cwin->exp_on = TV_ZERO;
                     cwin->seq_num = sm.seq_num++;
                     nxt = nxt + cwin->buf_len;
-                    sent_idx += cwin->buf_len;
-                    printf("gbn_send: new packet with seq: %d \n", cwin->seq_num);
+                    nxt_idx += cwin->buf_len;
+                    printf("gbn_send: new packet with seq: %d : payload %d bytes\n", cwin->seq_num, cwin->buf_len);
                 } else if (cwin->data_acked || timercmp(&cwin->exp_on, &now, >)) {
                     //either an acked packet not removed from window( cant be)
                     // or packet is still not yet expired.
@@ -124,8 +126,14 @@ ssize_t gbn_send(int sockfd, const void *buf, size_t len, int flags) {
             }
             //Wait for data ack. Sets up the timers internally.
             wait_for_dataack(win, win_size);
-            confirmed_idx = move_window(win, win_size, confirmed_idx);
+            confirmed_idx += move_window(win, win_size);
             win_size = adjust_window_size(win, win_size);
+            struct window_elem* lst=last_win_elem(win, win_size);
+            if(lst!=NULL && lst->buf!=NULL){
+                nxt=lst->buf+lst->buf_len;
+                nxt_idx=nxt-buf;
+            }
+
         }
         sent=confirmed_idx;
         printf("sent %d bytes", sent);
@@ -135,27 +143,13 @@ ssize_t gbn_send(int sockfd, const void *buf, size_t len, int flags) {
     return sent;
 }
 
-int adjust_window_size(struct window_elem* window, int current_size) {
-    int size = current_size;
-    if (sm.num_cont_success >= current_size) {
-        size = fmin(2 * current_size, MAX_WINDOW_SIZE);
-    }
-    if (sm.num_cont_fail > 0) {
-        size = 1;
-        //delete the othervalues.
-        for(int i=1; i<current_size; i++){
-            window[i].buf=NULL;
-            window[i].buf_len=-1;
+struct window_elem* last_win_elem(struct window_elem* win, int win_size) {
+    for(int i=win_size-1; i>=0; i--){
+        if(win[i].buf!=NULL){
+            return &win[i];
         }
-        sm.seq_num=window[0].seq_num+1;
     }
-    if (size > current_size) {
-        printf("gbn_send: fast mode. Win Size %d \n", size);
-    } else if (size < current_size) {
-        printf("gbn_send: slow mode. Win Size %d \n", size);
-    }
-
-    return size;
+    return NULL;
 }
 
 
@@ -218,8 +212,8 @@ ssize_t gbn_recv(int sockfd, void *buf, size_t len, int flags) {
             gbnhdr data_ack;
             uint32_t  csum;
             csum = checksum(&data_seg, data_seg.length);
-
-            if (data_seg.type == DATA && data_seg.seqnum == sm.seq_num && csum == data_seg.checksum) {
+            //&& csum == data_seg.checksum
+            if (data_seg.type == DATA && data_seg.seqnum == sm.seq_num ) {
                 if (data_seg.length == numbytes) {
                     sm.seq_num = data_seg.seqnum + 1;
                     make_dataack_pack(&data_ack, sm.seq_num);
@@ -251,7 +245,6 @@ ssize_t gbn_recv(int sockfd, void *buf, size_t len, int flags) {
 int gbn_close(int sockfd) {
 
     if (sm.state == ESTABLISHED) {
-
         int finsent = 0;
         uint8_t fin_seq_num=sm.seq_num++;
         while (finsent < 6) {
@@ -537,18 +530,44 @@ gbnhdr make_dataack_pack(gbnhdr *seg, uint8_t seq_num) {
     seg->checksum = checksum(&seg,6);
 }
 
-int move_window(struct window_elem *window, int win_len, int sidx) {
+int move_window(struct window_elem *window, int win_len) {
+    int acked_data_amt=0;
     int i = 0;
     while (window[i].buf != NULL && window[i].data_acked == true && i < win_len) {
-        sidx += window[i].buf_len;
+        printf("gbn_send: kicked out of win frame. seq: %d\n", window[i].seq_num);
+        acked_data_amt += window[i].buf_len;
         window[i++].buf = NULL;
+
     }
     int j;
     for (j = 0; j < i && i < win_len; j++) {
         window[j] = window[i];
-        window[i++].buf = NULL;
+        window[i].buf = NULL;
+        ++i;
     }
-    return sidx;
+    return acked_data_amt;
+}
+
+int adjust_window_size(struct window_elem* window, int current_size) {
+    int size = current_size;
+    if (sm.num_cont_success >= current_size) {
+        size = fmin(2 * current_size, MAX_WINDOW_SIZE);
+    }
+    if (sm.num_cont_fail > 0) {
+        size = 1;
+        //delete the othervalues.
+        for(int i=1; i<current_size; i++){
+            window[i].buf=NULL;
+            window[i].buf_len=-1;
+        }
+        sm.seq_num=window[0].seq_num+1;
+    }
+    if (size > current_size) {
+        printf("gbn_send: fast mode. Win Size %d \n", size);
+    } else if (size < current_size) {
+        printf("gbn_send: slow mode. Win Size %d \n", size);
+    }
+    return size;
 }
 
 void init_window(struct window_elem *win, int win_len) {
