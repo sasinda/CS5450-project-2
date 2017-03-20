@@ -1,6 +1,8 @@
 #ifndef _gbn_h
 #define _gbn_h
 
+#define h_addr h_addr_list[0]
+
 #include <arpa/inet.h>
 #include <tgmath.h>
 #include <sys/time.h>
@@ -59,14 +61,12 @@ typedef struct state_t{
 	uint8_t state;
 	int sockfd;
 	uint8_t seq_num;
-    //contains the next seq num to send a packet with, or the next expected seq num
 	int num_cont_success;
 	int num_cont_fail;
     struct sockaddr my_sock_addr;
     socklen_t my_sock_len;
     struct sockaddr dest_sock_addr;
     socklen_t dest_sock_len;
-
 
 } state_t;
 
