@@ -46,10 +46,17 @@ int adjust_window_size(struct window_elem *window, int current_size);
 
 struct window_elem *last_win_elem(struct window_elem *win, int win_size);
 
+int min(int a, int b);
+
 bool csum_correct(gbnhdr *ptr);
 
 state_t sm;
 
+
+int min(int a, int b){
+    if(a<b) return a;
+    else return b;
+}
 
 void *get_in_addr(struct sockaddr *sa) {
     if (sa->sa_family == AF_INET) {
@@ -212,7 +219,7 @@ ssize_t gbn_recv(int sockfd, void *buf, size_t len, int flags) {
 
     int data_len = -1;
     while (1) {
-        int numbytes = recvfrom(sockfd, &data_seg, fmin(ACCPT_BUFLEN, len + HEADLEN), 0,
+        int numbytes = recvfrom(sockfd, &data_seg, min(ACCPT_BUFLEN, len + HEADLEN), 0,
                                 (struct sockaddr *) &their_addr, &addr_len);
         if (numbytes > 0 &&  csum_correct(&data_seg)) {
             gbnhdr data_ack;
@@ -223,7 +230,7 @@ ssize_t gbn_recv(int sockfd, void *buf, size_t len, int flags) {
                     make_dataack_pack(&data_ack, sm.seq_num);
                     //send dataack , copy data to buffer and break.
                     sendto(sockfd, &data_ack, data_ack.length, 0, &sm.dest_sock_addr, sm.dest_sock_len);
-                    memcpy(buf, data_seg.data, fmin(data_seg.length, len + HEADLEN));
+                    memcpy(buf, data_seg.data, min(data_seg.length, len + HEADLEN));
                     printf("gbn_recv: %d bytes. Sent data ack for seq: %d\n", numbytes, data_ack.seqnum);
                     data_len = data_seg.length - HEADLEN;
                     break;
@@ -603,7 +610,7 @@ int move_window(struct window_elem *window, int win_len) {
 int adjust_window_size(struct window_elem *window, int current_size) {
     int size = current_size;
     if (sm.num_cont_success >= current_size) {
-        size = fmin(2 * current_size, MAX_WINDOW_SIZE);
+        size = min(2 * current_size, MAX_WINDOW_SIZE);
     }
     if (sm.num_cont_fail > 0) {
         size = 1;
