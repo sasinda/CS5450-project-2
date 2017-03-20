@@ -58,7 +58,7 @@ void *get_in_addr(struct sockaddr *sa) {
 
 
 uint16_t checksum(uint8_t *buf, int nwords) {
-    uint32_t sum;
+    uint16_t sum;
     for (sum = 0; nwords > 0; nwords--)
         sum += *buf++;
     sum = (sum >> 8) + (sum & 0xff);
@@ -210,10 +210,13 @@ ssize_t gbn_recv(int sockfd, void *buf, size_t len, int flags) {
                                 (struct sockaddr *) &their_addr, &addr_len);
         if (numbytes > 0) {
             gbnhdr data_ack;
-            uint32_t  csum;
-            csum = checksum(&data_seg, data_seg.length);
-            //&& csum == data_seg.checksum
-            if (data_seg.type == DATA && data_seg.seqnum == sm.seq_num ) {
+            uint16_t  csum;
+            gbnhdr da = data_seg;
+            da.checksum =0;
+
+            csum = checksum(&da, da.length);
+
+            if (data_seg.type == DATA && data_seg.seqnum == sm.seq_num && csum == data_seg.checksum) {
                 if (data_seg.length == numbytes) {
                     sm.seq_num = data_seg.seqnum + 1;
                     make_dataack_pack(&data_ack, sm.seq_num);
